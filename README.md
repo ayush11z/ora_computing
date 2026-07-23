@@ -15,7 +15,7 @@ Base model: `Qwen/Qwen2.5-1.5B-Instruct`.
 ## Status
 
 - [x] `prune.py` — structured depth pruning (this is ready to run)
-- [ ] `distill.py` — fixed-budget LoRA distillation recovery
+- [x] `distill.py` — fixed-budget LoRA distillation recovery (ready to run; smoke-test with `--steps 50` before the full budget)
 - [ ] `evaluate.py` — lm-evaluation-harness benchmark runs
 - [ ] `profile.py` — GGUF size + CPU throughput profiling
 - [ ] `analyze.py` — ablation table + plots
@@ -91,6 +91,73 @@ generations + `prune_info.json`) once you've run this on your GPU box and
 we'll decide whether to move on to `distill.py` or adjust the pruning
 config first.
 
+## Step 2: Distill (fixed-budget recovery)
+
+Smoke test first — 50 steps, not the full budget, to catch bugs cheaply:
+
+```bash
+python distill.py \
+  --student models/pruned_40 \
+  --teacher Qwen/Qwen2.5-1.5B-Instruct \
+  --steps 50 \
+  --output models/distilled_40_test
+```
+
+If that runs clean and the loss trends down, do the real run (the flag
+just defaults to this, so you can drop `--steps` entirely):
+
+```bash
+python distill.py \
+  --student models/pruned_40 \
+  --teacher Qwen/Qwen2.5-1.5B-Instruct \
+  --output models/distilled_40
+```
+
+And the zero-recovery "before" baseline for the same ratio (no training,
+just a manifest pointing back at the pruned model, for `evaluate.py` to
+consume uniformly alongside the distilled variants):
+
+```bash
+python distill.py \
+  --student models/pruned_40 \
+  --teacher Qwen/Qwen2.5-1.5B-Instruct \
+  --no-distill \
+  --output models/baseline_40
+```
+
+What it does:
+1. Loads the teacher (frozen, full-precision-relative-to-`--dtype`) and the
+   pruned student, wraps the student in a LoRA adapter (rank 16 / alpha 32,
+   applied to all attention + MLP projection layers, adapter weights kept
+   fp32 for optimizer stability even though the frozen base stays fp16).
+2. Streams chat-formatted examples from `HuggingFaceH4/ultrachat_200k`
+   (`train_sft` split), tokenized with the model's own chat template.
+3. Each step: run both teacher and student on the *same* batch, minimize
+   temperature-scaled KL divergence between their next-token distributions
+   (`--temperature`, default 2.0), optionally blended with a hard-label
+   cross-entropy term via `--ce-weight` (default 0.0 = pure soft-label KD;
+   spec suggests ~0.1 if training looks unstable).
+4. Saves only the LoRA adapter (small) + a `distill_info.json` manifest
+   (loss curve, tokens seen, exact config) — not a full copy of the base
+   model. Reload later with `PeftModel.from_pretrained(base_model, output_dir)`.
+
+**Fixed budget, held constant across every ratio:** `FULL_BUDGET_STEPS = 1000`
+gradient update steps (a module-level constant, not a tunable — the whole
+point of the ablation is that every ratio gets the same budget). Passing a
+different `--steps` prints a loud warning and the manifest records
+`is_official_budget_run: false`, so a smoke test can never be silently
+mistaken for a real ablation run later. Token count is a *consequence* of
+`--batch-size × --seq-len × --steps`, not the thing held constant — the
+spec allowed either as the fixed unit; we picked steps since that's what
+the spec's own CLI example uses. Defaults (batch 4 × seq_len 512) land
+at ~2.05M tokens over the full budget, sized to comfortably fit a single
+T4/A10; bump `--batch-size`/`--seq-len`/`--grad-accum-steps` if you want
+to push closer to the spec's illustrative ~10M-token figure, but do it
+identically across all three ratios or the ablation stops being apples-to-apples.
+
+Run this three times per ratio (baseline / smoke-test / full budget) for
+each of the three pruning ratios once the smoke test looks healthy.
+
 ## Repo layout
 
 ```
@@ -98,7 +165,7 @@ ora-distillation-ablation/
 ├── README.md
 ├── requirements.txt
 ├── prune.py
-├── distill.py        (not yet implemented)
+├── distill.py
 ├── evaluate.py        (not yet implemented)
 ├── profile.py         (not yet implemented)
 ├── analyze.py          (not yet implemented)
