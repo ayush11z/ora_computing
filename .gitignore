@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# model artifacts (large, regenerable)
+models/
+*.gguf
+*.bin
+*.safetensors
+
+# results are regenerable but keep summary + plots tracked; ignore raw caches
+.cache/
+wandb/
+.DS_Store
