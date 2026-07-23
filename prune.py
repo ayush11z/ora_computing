@@ -140,6 +140,17 @@ def reindex_layer_idx(layers):
             layer.layer_idx = new_idx
 
 
+def reslice_per_layer_config(config, num_layers_before, kept_indices):
+    """Some configs (e.g. recent transformers versions add `layer_types`)
+    carry a list with one entry per decoder layer, parallel to
+    num_hidden_layers. Slice any such list down to the kept layers so it
+    stays consistent after pruning -- otherwise config validation on save
+    fails with a length mismatch."""
+    for attr_name, val in list(vars(config).items()):
+        if isinstance(val, list) and len(val) == num_layers_before:
+            setattr(config, attr_name, [val[i] for i in kept_indices])
+
+
 def sanity_generate(model, tokenizer, device, num_prompts, max_new_tokens):
     prompts = [
         "The capital of France is",
@@ -219,9 +230,11 @@ def main():
     remove_idx = choose_layers_to_remove(layer_params, scores, args.ratio, args.protect_layers)
     print(f"[prune] removing layers: {remove_idx}")
 
-    kept = [layer for i, layer in enumerate(layers) if i not in remove_idx]
+    kept_indices = [i for i in range(num_layers_before) if i not in remove_idx]
+    kept = [layers[i] for i in kept_indices]
     new_module_list = torch.nn.ModuleList(kept)
     reindex_layer_idx(new_module_list)
+    reslice_per_layer_config(model.config, num_layers_before, kept_indices)
     model.model.layers = new_module_list
     model.config.num_hidden_layers = len(kept)
 
