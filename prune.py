@@ -165,7 +165,7 @@ def main():
     ap.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
     ap.add_argument("--ratio", type=float, required=True, help="target fraction of params to remove, e.g. 0.2/0.4/0.6")
     ap.add_argument("--output", required=True)
-    ap.add_argument("--calib-dataset", default="wikitext")
+    ap.add_argument("--calib-dataset", default="Salesforce/wikitext")
     ap.add_argument("--calib-config", default="wikitext-103-raw-v1")
     ap.add_argument("--calib-samples", type=int, default=512)
     ap.add_argument("--seq-len", type=int, default=512)
