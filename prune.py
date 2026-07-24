@@ -20,6 +20,7 @@ import time
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 DTYPE_MAP = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
@@ -42,6 +43,7 @@ def build_calibration_batches(tokenizer, dataset_name, dataset_config, num_sampl
 
     buf = []
     chunks = []
+    pbar = tqdm(total=num_samples, desc="building calibration set", unit="chunk")
     for row in ds:
         text = row.get("text", "")
         if not text or not text.strip():
@@ -51,8 +53,10 @@ def build_calibration_batches(tokenizer, dataset_name, dataset_config, num_sampl
         while len(buf) >= seq_len:
             chunks.append(buf[:seq_len])
             buf = buf[seq_len:]
+            pbar.update(1)
         if len(chunks) >= num_samples:
             break
+    pbar.close()
 
     if len(chunks) < num_samples:
         raise RuntimeError(
@@ -98,7 +102,7 @@ def score_layers(model, layers, batches, device):
 
     model.eval()
     with torch.no_grad():
-        for batch in batches:
+        for batch in tqdm(batches, desc="scoring calibration batches", unit="batch"):
             batch = batch.to(device)
             model(input_ids=batch, use_cache=False)
             for idx in range(num_layers):
@@ -159,7 +163,7 @@ def sanity_generate(model, tokenizer, device, num_prompts, max_new_tokens):
     ][:num_prompts]
     model.eval()
     outputs = []
-    for p in prompts:
+    for p in tqdm(prompts, desc="sanity-check generations", unit="prompt"):
         inputs = tokenizer(p, return_tensors="pt").to(device)
         with torch.no_grad():
             out = model.generate(

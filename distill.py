@@ -40,6 +40,7 @@ import torch
 import torch.nn.functional as F
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_linear_schedule_with_warmup
 
 FULL_BUDGET_STEPS = 1000
@@ -64,6 +65,7 @@ def build_training_batches(tokenizer, dataset_name, num_examples, seq_len, seed)
     ds = ds.shuffle(seed=seed, buffer_size=10_000)
 
     examples = []
+    pbar = tqdm(total=num_examples, desc="streaming training examples", unit="ex")
     for row in ds:
         messages = row.get("messages")
         if not messages:
@@ -73,8 +75,10 @@ def build_training_batches(tokenizer, dataset_name, num_examples, seq_len, seed)
         if enc["input_ids"].shape[1] < 8:
             continue
         examples.append(enc)
+        pbar.update(1)
         if len(examples) >= num_examples:
             break
+    pbar.close()
 
     if len(examples) < num_examples:
         raise RuntimeError(
@@ -214,7 +218,11 @@ def main():
         num_training_steps=total_optimizer_steps,
     )
     scaler = torch.cuda.amp.GradScaler(enabled=(dtype == torch.float16 and device == "cuda"))
-    autocast_ctx = torch.autocast(device_type=device if device != "mps" else "cpu", dtype=dtype, enabled=(device != "cpu"))
+    # autocast on MPS only supports bf16 reliably; fp16 there is prone to NaNs.
+    # fp32 (the recommended local default) never needs autocast at all.
+    autocast_enabled = dtype != torch.float32 and (device == "cuda" or (device == "mps" and dtype == torch.bfloat16))
+    autocast_device_type = device if device in ("cuda", "mps") else "cpu"
+    autocast_ctx = torch.autocast(device_type=autocast_device_type, dtype=dtype, enabled=autocast_enabled)
 
     student.train()
     loss_history = []
@@ -222,7 +230,8 @@ def main():
     example_ptr = 0
     t0 = time.time()
 
-    for step in range(args.steps):
+    pbar = tqdm(range(args.steps), desc="distilling", unit="step")
+    for step in pbar:
         optimizer.zero_grad()
         step_loss = 0.0
         for _ in range(args.grad_accum_steps):
@@ -248,11 +257,12 @@ def main():
         scaler.update()
         scheduler.step()
         loss_history.append(step_loss)
+        pbar.set_postfix(loss=f"{step_loss:.4f}", tokens=tokens_seen)
 
         if step % args.log_every == 0 or step == args.steps - 1:
             elapsed = time.time() - t0
-            print(f"  step {step:4d}/{args.steps}  loss={step_loss:.4f}  "
-                  f"tokens_seen={tokens_seen:,}  elapsed={elapsed:.0f}s")
+            tqdm.write(f"  step {step:4d}/{args.steps}  loss={step_loss:.4f}  "
+                       f"tokens_seen={tokens_seen:,}  elapsed={elapsed:.0f}s")
 
     print(f"[distill] training done in {time.time() - t0:.0f}s, {tokens_seen:,} tokens seen")
 
