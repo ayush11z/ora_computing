@@ -12,12 +12,18 @@ that constant; passing a different value (e.g. --steps 50 for a cheap
 end-to-end smoke test) prints a loud warning so a test run can never be
 silently mistaken for an official ablation run.
 
-Token budget: with the default --batch-size 4 x --seq-len 512, that's
-2048 tokens/step, ~2.05M tokens over the full 1000-step budget. This (not
-~10M) is the realized token count for the default config -- documented here
-since the spec allowed either steps or tokens as the fixed unit and we
-picked steps (matching the spec's own CLI example), with batch/seq sized to
-comfortably fit a single T4/A10.
+Token budget: with the default --batch-size 1 x --grad-accum-steps 4 x
+--seq-len 512, that's 2048 tokens/step (one optimizer update, i.e. one
+entry of "step" in FULL_BUDGET_STEPS, spans 4 micro-batches), ~2.05M
+tokens over the full 1000-step budget. This (not ~10M) is the realized
+token count for the default config -- documented here since the spec
+allowed either steps or tokens as the fixed unit and we picked steps
+(matching the spec's own CLI example). Micro-batch is kept at 1 rather
+than upping --batch-size directly because Qwen2.5's ~152K vocabulary
+makes the (batch, seq, vocab) tensors in the KD loss large (~1.16GB each
+at batch=4/seq=512/fp32) -- gradient accumulation reaches the same
+effective batch/step without holding that many at once, so it fits a
+single T4's ~15GB.
 
 Usage:
     python distill.py --student models/pruned_40 --teacher Qwen/Qwen2.5-1.5B-Instruct \
@@ -130,9 +136,12 @@ def main():
     ap.add_argument("--steps", type=int, default=FULL_BUDGET_STEPS,
                      help=f"gradient update steps; official ablation runs must use "
                           f"{FULL_BUDGET_STEPS} (the default) -- override only for smoke tests")
-    ap.add_argument("--batch-size", type=int, default=4)
+    ap.add_argument("--batch-size", type=int, default=1,
+                     help="micro-batch size; Qwen2.5's ~152K vocab makes the (batch, seq, vocab) "
+                          "KD-loss tensors large, so this stays small by default and "
+                          "--grad-accum-steps makes up the effective batch instead, to fit a T4")
     ap.add_argument("--seq-len", type=int, default=512)
-    ap.add_argument("--grad-accum-steps", type=int, default=1)
+    ap.add_argument("--grad-accum-steps", type=int, default=4)
     ap.add_argument("--temperature", type=float, default=2.0)
     ap.add_argument("--ce-weight", type=float, default=0.0,
                      help="weight of hard-label CE term blended with KD loss (spec suggests ~0.1 "
@@ -217,7 +226,7 @@ def main():
         num_warmup_steps=int(args.warmup_ratio * total_optimizer_steps),
         num_training_steps=total_optimizer_steps,
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=(dtype == torch.float16 and device == "cuda"))
+    scaler = torch.amp.GradScaler("cuda", enabled=(dtype == torch.float16 and device == "cuda"))
     # autocast on MPS only supports bf16 reliably; fp16 there is prone to NaNs.
     # fp32 (the recommended local default) never needs autocast at all.
     autocast_enabled = dtype != torch.float32 and (device == "cuda" or (device == "mps" and dtype == torch.bfloat16))

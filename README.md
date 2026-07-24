@@ -149,11 +149,17 @@ different `--steps` prints a loud warning and the manifest records
 mistaken for a real ablation run later. Token count is a *consequence* of
 `--batch-size × --seq-len × --steps`, not the thing held constant — the
 spec allowed either as the fixed unit; we picked steps since that's what
-the spec's own CLI example uses. Defaults (batch 4 × seq_len 512) land
-at ~2.05M tokens over the full budget, sized to comfortably fit a single
-T4/A10; bump `--batch-size`/`--seq-len`/`--grad-accum-steps` if you want
-to push closer to the spec's illustrative ~10M-token figure, but do it
-identically across all three ratios or the ablation stops being apples-to-apples.
+the spec's own CLI example uses. Defaults (batch 1 × grad-accum 4 ×
+seq_len 512 = 2048 tokens/optimizer-step) land at ~2.05M tokens over the
+full budget. Micro-batch stays at 1 by default rather than a larger
+`--batch-size` directly because Qwen2.5's ~152K vocabulary makes the
+(batch, seq, vocab) tensors in the KD loss large enough to OOM a T4 at
+batch 4 — gradient accumulation reaches the same effective batch per
+step without that peak memory cost. Bump `--batch-size`/`--seq-len`/
+`--grad-accum-steps` if you want to push closer to the spec's
+illustrative ~10M-token figure (or you're on a bigger GPU than a T4),
+but do it identically across all three ratios or the ablation stops
+being apples-to-apples.
 
 Run this three times per ratio (baseline / smoke-test / full budget) for
 each of the three pruning ratios once the smoke test looks healthy.
